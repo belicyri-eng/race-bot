@@ -1,0 +1,79 @@
+// main.ts
+// Scratcvh Strategy: EMA Crossover + Trend Filter
+// Competes for highest Net PnL on CBBTC 1m data
+
+import { runBars } from './sdk/makefun-bars';
+
+async function main() {
+  await runBars({
+    onBatch(batch) {
+      const orders: any[] = [];
+      
+      // 1. Get Account State
+      const cash = Number(batch.account.cash_quote_units);
+      const pos = batch.account.positions.find(p => p.symbol === 'CBBTC');
+      const currentQty = pos ? Number(pos.qty) : 0;
+      const costBasis = pos ? Number(pos.cost_quote_units) / (currentQty || 1) : 0;
+      
+      // 2. Prepare Price Data
+      const closes = batch.bars.map(b => Number(b.c));
+    if (closes.length < 50) return orders; // Wait for warmup
+
+      // 3. Calculate Indicators (EMA 9 & 21)
+      const getEMA = (data: number[], period: number) => {
+        if (data.length < period) return null;
+        const k = 2 / (period + 1);
+        let ema = data.slice(0, period).reduce((a, b) => a + b, 0) / period;
+        for (let i = period; i < data.length; i++) {
+          ema = data[i] * k + ema * (1 - k);
+        }
+        return ema;
+      };
+
+      const ema9 = getEMA(closes, 9);
+      const ema21 = getEMA(closes, 21);
+      const lastClose = closes[closes.length - 1];
+      const prevClose = closes[closes.length - 2];
+
+      // 4. Trading Logic
+      
+      // BUY: EMA9 crosses above EMA21 AND Price > EMA21
+      if (cash > 100 && currentQty === 0 && ema9 !== null && ema21 !== null) {
+        if (lastClose > ema21 && prevClose <= ema21) {
+           // Buy with 90% of available cash
+           const buyAmount = Math.floor(cash * 0.9);
+           orders.push({
+             side: 'buy',
+             client_id: 'scrat-buy',
+             symbol: 'CBBTC',
+             notional_quote_units: String(buyAmount),
+             max_slippage_bps: 100 
+           });
+        }
+      }
+
+      // SELL: EMA9 crosses below EMA21 OR Take Profit (1%) OR Stop Loss (-0.5%)
+      if (currentQty > 0 && ema9 !== null && ema21 !== null) {
+        const pnlPct = (lastClose - costBasis) / costBasis;
+        
+        const crossDown = prevClose >= ema21 && lastClose < ema21;
+        const takeProfit = pnlPct > 0.01;   // 1% profit
+        const stopLoss = pnlPct < -0.005;   // 0.5% loss
+
+        if (crossDown || takeProfit || stopLoss) {
+          orders.push({
+            side: 'sell',
+            client_id: 'scrat-sell',
+            symbol: 'CBBTC',
+            qty: String(currentQty),
+            max_slippage_bps: 100
+          });
+        }
+      }
+
+      return orders;
+    },
+  });
+}
+
+main();
